@@ -134,6 +134,7 @@ class SBSM(nn.Module):
         np.save(savepath, self.masks)
         self.masks = torch.from_numpy(self.masks).float()
         self.masks = self.masks.cuda()
+        self.N = self.masks.shape[0]
         self.window_size = window_size
         self.stride = stride
 
@@ -142,11 +143,9 @@ class SBSM(nn.Module):
         self.masks = torch.from_numpy(self.masks).float().cuda()
         self.N = self.masks.shape[0]
 
-    def weighted_avg(self, scalar_vec):
+    def weighted_avg(self, K):
         count = self.N - self.masks.sum(dim=(0, 1))
-        sal = (1 - self.masks).permute(2, 3, 1, 0) * \
-            scalar_vec.clamp(min=0)
-        sal = sal.sum(dim=-1).permute(2, 0, 1) / count
+        sal = K.sum(dim=-1).permute(2, 0, 1) / count
         # TODO: make min local vs. global
         sal = sal.clamp(min=(sal.max() * self.thresh))
 
@@ -163,15 +162,16 @@ class SBSM(nn.Module):
         # Apply array of masks to the image
         stack = torch.mul(self.masks, x.data)
 
-        p = []
+        m_dist = []
         for i in range(0, self.N, self.gpu_batch):
             x = self.model(stack[i:min(i + self.gpu_batch, self.N)])
-            p.append(torch.cdist(x_q, x))
-        p = torch.cat(p, dim=1)
+            m_dist.append(torch.cdist(x_q, x))
+        m_dist = torch.cat(m_dist, dim=1)
 
         # Compute saliency
-        m_dist = p - o_dist
-        sal = self.weighted_avg(m_dist)
+        K = (1 - self.masks).permute(2, 3, 1, 0) * \
+            (m_dist - o_dist).clamp(min=0)
+        sal = self.weighted_avg(K)
 
         return sal
 
@@ -190,16 +190,17 @@ class SBSMBatch(SBSM):
                           x.data.view(B * C, H, W))
         stack = stack.view(B * self.N, C, H, W)
 
-        p = []
+        m_dist = []
         for i in range(0, self.N*B, self.gpu_batch):
             x = self.model(stack[i:min(i + self.gpu_batch, self.N)])
-            p.append(torch.cdist(x_q, x))
-        p = torch.cat(p, dim=1)
-        p = p.view(B, self.N)
+            m_dist.append(torch.cdist(x_q, x))
+        m_dist = torch.cat(m_dist, dim=1)
+        m_dist = m_dist.view(B, self.N)
 
         # Compute saliency
-        m_dist = p - o_dist
-        sal = self.weighted_avg(m_dist)
+        K = (1 - self.masks).permute(2, 3, 1, 0) * \
+            (m_dist - o_dist).clamp(min=0)
+        sal = self.weighted_avg(K)
 
         return sal
 
