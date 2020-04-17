@@ -57,14 +57,15 @@ class RISE(nn.Module):
         sal = sal.view((CL, H, W))
         sal = sal / N / self.p1
         return sal
-    
-    
+
+
 class RISEBatch(RISE):
     def forward(self, x):
         # Apply array of filters to the image
         N = self.N
         B, C, H, W = x.size()
-        stack = torch.mul(self.masks.view(N, 1, H, W), x.data.view(B * C, H, W))
+        stack = torch.mul(self.masks.view(N, 1, H, W),
+                          x.data.view(B * C, H, W))
         stack = stack.view(B * N, C, H, W)
         stack = stack
 
@@ -77,6 +78,129 @@ class RISEBatch(RISE):
         p = p.view(N, B, CL)
         sal = torch.matmul(p.permute(1, 2, 0), self.masks.view(N, H * W))
         sal = sal.view(B, CL, H, W)
+        return sal
+
+
+class SBSM(nn.Module):
+    def __init__(self, model, thresh, input_size, gpu_batch=100):
+        super(SBSM, self).__init__()
+        self.model = model
+        self.thresh = thresh  # TODO: make this a property of visualization?
+        self.input_size = input_size
+        self.gpu_batch = gpu_batch
+
+    def generate_masks(self, window_size, stride, savepath='masks.npy'):
+        """
+        Generates sliding window type binary masks used in augment() to 
+        mask an image. The Images are resized to 224x224 to 
+        enable re-use of masks Generating the sliding window style masks.
+        :param int window_size: the block window size 
+        (with value 0, other areas with value 1)
+        :param int stride: the sliding step
+        :param tuple image_size: the mask size which should be the 
+        same to the image size
+        :return: the sliding window style masks
+        :rtype: numpy.ndarray
+        """
+
+        rows = np.arange(0 + stride - window_size, self.input_size[0], stride)
+        cols = np.arange(0 + stride - window_size, self.input_size[1], stride)
+
+        mask_num = len(rows) * len(cols)
+        self.masks = np.ones(
+            (mask_num, self.input_size[0], self.input_size[1]), dtype=np.float64)
+        i = 0
+        for r in rows:
+            for c in cols:
+                if r < 0:
+                    r1 = 0
+                else:
+                    r1 = r
+                if r + window_size > self.input_size[0]:
+                    r2 = self.input_size[0]
+                else:
+                    r2 = r + window_size
+                if c < 0:
+                    c1 = 0
+                else:
+                    c1 = c
+                if c + window_size > self.input_size[1]:
+                    c2 = self.input_size[1]
+                else:
+                    c2 = c + window_size
+                self.masks[i, r1:r2, c1:c2] = 0
+                i += 1
+        self.masks = self.masks.reshape(-1, 1, *self.input_size)
+        np.save(savepath, self.masks)
+        self.masks = torch.from_numpy(self.masks).float()
+        self.masks = self.masks.cuda()
+        self.window_size = window_size
+        self.stride = stride
+
+    def load_masks(self, filepath):
+        self.masks = np.load(filepath)
+        self.masks = torch.from_numpy(self.masks).float().cuda()
+        self.N = self.masks.shape[0]
+
+    def weighted_avg(self, scalar_vec):
+        count = self.N - self.masks.sum(dim=(0, 1))
+        sal = (1 - self.masks).permute(2, 3, 1, 0) * \
+            scalar_vec.clamp(min=0)
+        sal = sal.sum(dim=-1).permute(2, 0, 1) / count
+        # TODO: make min local vs. global
+        sal = sal.clamp(min=(sal.max() * self.thresh))
+
+        return sal
+
+    def forward(self, x_q, x):
+        _, _, H, W = x.size()
+
+        # Get embedding of query and retrieval image
+        x_q = self.model(x_q.data)
+        x_r = self.model(x.data)
+        o_dist = torch.cdist(x_q, x_r)
+
+        # Apply array of masks to the image
+        stack = torch.mul(self.masks, x.data)
+
+        p = []
+        for i in range(0, self.N, self.gpu_batch):
+            x = self.model(stack[i:min(i + self.gpu_batch, self.N)])
+            p.append(torch.cdist(x_q, x))
+        p = torch.cat(p, dim=1)
+
+        # Compute saliency
+        m_dist = p - o_dist
+        sal = self.weighted_avg(m_dist)
+
+        return sal
+
+
+class SBSMBatch(SBSM):
+    def forward(self, x_q, x):
+        B, C, H, W = x.size()
+
+        # Get embedding of query and retrieval images
+        x_q = self.model(x_q.data)
+        x_r = self.model(x.data)
+        o_dist = torch.cdist(x_q, x_r)
+
+        # Apply array of masks to the image
+        stack = torch.mul(self.masks.view(self.N, 1, H, W),
+                          x.data.view(B * C, H, W))
+        stack = stack.view(B * self.N, C, H, W)
+
+        p = []
+        for i in range(0, self.N*B, self.gpu_batch):
+            x = self.model(stack[i:min(i + self.gpu_batch, self.N)])
+            p.append(torch.cdist(x_q, x))
+        p = torch.cat(p, dim=1)
+        p = p.view(B, self.N)
+
+        # Compute saliency
+        m_dist = p - o_dist
+        sal = self.weighted_avg(m_dist)
+
         return sal
 
 # To process in batches
