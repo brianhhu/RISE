@@ -4,6 +4,8 @@ import torch.nn as nn
 from skimage.transform import resize
 from tqdm import tqdm
 
+from gradcam import ModelOutputs
+
 
 class RISE(nn.Module):
     def __init__(self, model, input_size, gpu_batch=100):
@@ -203,6 +205,63 @@ class SBSMBatch(SBSM):
         sal = self.weighted_avg(K)
 
         return sal
+
+
+class SimAtt(nn.Module):
+    def __init__(self, model, feature_module, target_layer_names, input_size):
+        super(SimAtt, self).__init__()
+        self.model = model
+        self.feature_module = feature_module
+        self.input_size = input_size
+
+        self.extractor = ModelOutputs(
+            self.model, self.feature_module, target_layer_names)
+
+    def forward(self, x_a, x_p, x_n=None):
+        # Consider all possible conditions:
+        # 1. anchor + positive (Siamese)
+        # 2. anchor + negative (Siamese)
+        # 3. anchor + positive + negative (triplet)
+        # 4. anchor + positive + negative1 + negative2 (quadruplet)
+
+        # Extract intermediate activations and outputs
+        A, x = self.extractor(torch.cat((x_a, x_p)))  # , x_n)))
+
+        # Compute positive and negative weights
+        # Note: hard-coded for now
+        w_p = 1 - torch.abs(x[0] - x[1])
+        # w_n = torch.abs(x[0] - x[2])
+
+        # take elementwise product
+        w = w_p  # * w_n
+
+        # compute sample scores
+        s = torch.matmul(x, w)
+
+        # loop through sample scores
+        feats = A[-1].data  # choose last set of features
+        M = torch.zeros(feats.shape[0], feats.shape[2],
+                        feats.shape[3], device=x_a.device)
+        for i, s_i in enumerate(s):
+            self.feature_module.zero_grad()
+            self.model.zero_grad()
+            s_i.backward(retain_graph=True)
+            s_i_grad = self.extractor.get_gradients()[-1]
+            weights = s_i_grad.mean(dim=(0, 2, 3))
+
+            # loop through channels
+            for j, w in enumerate(weights):
+                M[i] += w * feats[i, j, :, :]
+
+        # apply ReLU
+        M.clamp(min=0)
+
+        # upsample
+        M = nn.functional.interpolate(M.unsqueeze(1), size=(
+            x_a.shape[2], x_a.shape[3]), mode='bilinear').squeeze()
+
+        return M
+
 
 # To process in batches
 # def explain_all_batch(data_loader, explainer):
