@@ -217,23 +217,30 @@ class SimAtt(nn.Module):
         self.extractor = ModelOutputs(
             self.model, self.feature_module, target_layer_names)
 
-    def forward(self, x_a, x_p, x_n=None):
+    def forward(self, x_a, x_p=None, x_n=None):
         # Consider all possible conditions:
         # 1. anchor + positive (Siamese)
         # 2. anchor + negative (Siamese)
         # 3. anchor + positive + negative (triplet)
         # 4. anchor + positive + negative1 + negative2 (quadruplet)
 
-        # Extract intermediate activations and outputs
-        A, x = self.extractor(torch.cat((x_a, x_p)))  # , x_n)))
+        # concatenate all inputs
+        x = x_a
+        if x_p is not None:
+            x = torch.cat((x, x_p))
+        if x_n is not None:
+            x = torch.cat((x, x_n))
 
-        # Compute positive and negative weights
-        # Note: hard-coded for now
-        w_p = 1 - torch.abs(x[0] - x[1])
-        # w_n = torch.abs(x[0] - x[2])
+        # extract intermediate activations and outputs
+        A, x = self.extractor(x)
+
+        # compute positive and negative weights
+        w = torch.abs(x[0] - x[1:])
+        if x_p is not None:
+            w[0] = 1 - w[0]
 
         # take elementwise product
-        w = w_p  # * w_n
+        w = torch.prod(w, dim=0)
 
         # compute sample scores
         s = torch.matmul(x, w)
