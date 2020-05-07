@@ -208,11 +208,10 @@ class SBSMBatch(SBSM):
 
 
 class SimAtt(nn.Module):
-    def __init__(self, model, feature_module, target_layer_names, input_size):
+    def __init__(self, model, feature_module, target_layer_names):
         super(SimAtt, self).__init__()
         self.model = model
         self.feature_module = feature_module
-        self.input_size = input_size
 
         self.extractor = ModelOutputs(
             self.model, self.feature_module, target_layer_names)
