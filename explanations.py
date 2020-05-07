@@ -282,7 +282,7 @@ class SimCAM(nn.Module):
         self.bn = bn
 
         self.extractor = ModelOutputs(
-            self.model, self.feature_module, target_layer_names)
+            self.model, self.feature_module, target_layer_names, return_gradients=False)
 
     def Point_Specific(self, decom, point=[0, 0], stream=1, size=(224, 224)):
         """

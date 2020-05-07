@@ -5,9 +5,10 @@ class FeatureExtractor():
     """ Class for extracting activations and 
     registering gradients from targetted intermediate layers """
 
-    def __init__(self, model, target_layers):
+    def __init__(self, model, target_layers, return_gradients=True):
         self.model = model
         self.target_layers = target_layers
+        self.return_gradients = return_gradients
         self.gradients = []
 
     def save_gradient(self, grad):
@@ -19,7 +20,8 @@ class FeatureExtractor():
         for name, module in self.model._modules.items():
             x = module(x)
             if name in self.target_layers:
-                x.register_hook(self.save_gradient)
+                if self.return_gradients:
+                    x.register_hook(self.save_gradient)
                 outputs += [x]
         return outputs, x
 
@@ -30,11 +32,11 @@ class ModelOutputs():
     2. Activations from intermeddiate targetted layers.
     3. Gradients from intermeddiate targetted layers. """
 
-    def __init__(self, model, feature_module, target_layers):
+    def __init__(self, model, feature_module, target_layers, return_gradients=True):
         self.model = model
         self.feature_module = feature_module
         self.feature_extractor = FeatureExtractor(
-            self.feature_module, target_layers)
+            self.feature_module, target_layers, return_gradients)
 
     def get_gradients(self):
         return self.feature_extractor.gradients
