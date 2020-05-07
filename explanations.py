@@ -269,6 +269,119 @@ class SimAtt(nn.Module):
         return M
 
 
+class SimCAM(nn.Module):
+    """
+    Adapted from: https://github.com/Jeff-Zilence/Explain_Metric_Learning/blob/master/Face_Verification/demo.py
+    """
+
+    def __init__(self, model, feature_module, target_layer_names, fc=None, bn=None):
+        super(SimCAM, self).__init__()
+        self.model = model
+        self.feature_module = feature_module
+        self.fc = fc
+        self.bn = bn
+
+        self.extractor = ModelOutputs(
+            self.model, self.feature_module, target_layer_names)
+
+    def Point_Specific(self, decom, point=[0, 0], stream=1, size=(224, 224)):
+        """
+            Generate the point-specific activation map
+            Use stream=1 for query point on image 1, generated map for image 2, and vice versa
+        """
+        if stream == 2:
+            decom_padding = np.pad(np.transpose(decom, (2, 3, 0, 1)), ((
+                1, 1), (1, 1), (0, 0), (0, 0)), mode='edge')
+        else:
+            decom_padding = np.pad(
+                decom, ((1, 1), (1, 1), (0, 0), (0, 0)), mode='edge')
+
+        # compute the transformed coordinates
+        x = (point[0] + 0.5) / size[0] * (decom_padding.shape[0]-2)
+        y = (point[1] + 0.5) / size[1] * (decom_padding.shape[1]-2)
+        x = x + 0.5
+        y = y + 0.5
+        x_min = int(np.floor(x))
+        y_min = int(np.floor(y))
+        x_max = x_min + 1
+        y_max = y_min + 1
+        dx = x - x_min
+        dy = y - y_min
+        interplolation = decom_padding[x_min, y_min]*(1-dx)*(1-dy) + \
+            decom_padding[x_max, y_min]*dx*(1-dy) + \
+            decom_padding[x_min, y_max]*(1-dx)*dy + \
+            decom_padding[x_max, y_max]*dx*dy
+
+        return np.maximum(interplolation, 0)
+
+    def forward(self, x_q, x):
+        # concatenate all inputs
+        x = torch.cat((x_q, x))
+
+        # extract intermediate activations and outputs
+        A, _ = self.extractor(x.data)
+
+        x = A[-1].data
+        x = x.permute(0, 2, 3, 1)
+
+        x_reshape = torch.reshape(x, [-1, x.shape[-1]])
+        # x_embed = torch.zeros(
+        #     [x_reshape.shape[0], fc.weight.data.shape[0]])
+
+        # consider all operations as one linear transformation, compute the equivalent feature for each position
+        weight = 1
+        bias = 0
+
+        if self.fc is not None:
+            weight *= torch.reshape(self.fc.weight.data, [
+                                    self.fc.weight.data.shape[0], x_reshape.shape[-1], x_reshape.shape[0]])
+            bias += self.fc.bias.data / x_reshape.shape[0] / x_reshape.shape[1]
+        if self.bn is not None:
+            weight /= torch.sqrt(self.bn.running_var.data).view(-1, 1, 1)
+            bias = (bias - self.bn.running_mean.data) / \
+                torch.sqrt(self.bn.running_var.data)
+
+            weight *= self.bn.weight.data.view(-1, 1, 1)
+            bias = bias * self.bn.weight.data + self.bn.bias.data
+
+        # # compute the transformed feature, break apart to avoid too large matrix operation in Memory
+        # for i in range(x_reshape.shape[0]):
+        #     x_embed[i] = torch.matmul(
+        #         x_reshape[i], weight[:, :, i].t())  # + bias
+
+        # compute the transformed feature
+        x_embed = x_reshape * weight
+
+        # reshape back
+        x_embed = torch.reshape(
+            x_embed, [x.shape[0], x.shape[1], x.shape[2], -1])
+
+        Decomposition = torch.zeros(
+            [x.shape[1], x.shape[2], x.shape[1], x.shape[2]], device=x_q.device)
+        for i in range(x.shape[1]):
+            for j in range(x.shape[2]):
+                for k in range(x.shape[1]):
+                    for l in range(x.shape[2]):
+                        Decomposition[i, j, k, l] = torch.sum(
+                            x_embed[0, i, j]*x_embed[1, k, l])
+        Decomposition = Decomposition / torch.max(Decomposition)
+
+        # apply ReLU
+        Decomposition.clamp(min=0)
+
+        # # Do Pointwise here...
+
+        # maps for query and retrieved image
+        decom_1 = torch.sum(Decomposition, dim=(2, 3))
+        decom_2 = torch.sum(Decomposition, dim=(0, 1))
+
+        # upsample
+        Decomposition = nn.functional.interpolate(torch.stack((decom_1, decom_2)).unsqueeze(
+            1), size=(x_q.shape[2], x_q.shape[3]), mode='bilinear').squeeze()
+
+        return Decomposition
+
+
 # To process in batches
 # def explain_all_batch(data_loader, explainer):
 #     n_batch = len(data_loader)
